@@ -1,0 +1,190 @@
+package lea;
+
+import java.util.*;
+import java_cup.runtime.Symbol;
+
+import lea.Node.*;
+
+parser code {:
+
+	private Reporter reporter;
+	private Reporter.Span errorSpan = Reporter.Span.EMPTY;
+
+	@SuppressWarnings("deprecation")
+	public Parser(Lexer lexer, Reporter reporter) {
+		super(lexer);
+		this.reporter = reporter;
+	}
+  
+	public Program parseProgram() {
+		try {
+			if(parse().value instanceof Program program)
+				return program;
+		} catch (Exception e) {
+			reporter.error(Reporter.Phase.PARSER, Reporter.Span.EMPTY, "Exception: " + e.getClass().getSimpleName());
+		}
+		return new Program(Set.of(), new ErrorNode());
+	}
+
+	@Override
+	public void syntax_error(Symbol currentSymbol) {
+		if(currentSymbol != null) 
+			errorSpan = errorSpan.union(reporter.span(currentSymbol.value));
+	}
+
+	private ErrorNode error(String message) { 
+		reporter.error(Reporter.Phase.PARSER, errorSpan, message);
+		errorSpan = Reporter.Span.EMPTY;
+		return new ErrorNode(); 
+	}
+
+	@Override
+    public void report_error(String message, Object info) {
+    		reporter.error(Reporter.Phase.PARSER, errorSpan, message);
+    }
+
+    @Override
+    public void report_fatal_error(String message, Object info) {
+    		reporter.error(Reporter.Phase.PARSER, errorSpan, message);
+    }
+
+	private <T extends Node> T mark(T n, Object anchorStart, Object anchorEnd) { 
+		reporter.attach(n, anchorStart, anchorEnd); 
+		return n; 
+	}
+    
+:}
+
+terminal							ALGORITHME, VARIABLES, DEBUT, FIN;
+terminal							SI, ALORS, SINON, TANT, QUE, FAIRE, POUR, DE, A, PAS;
+terminal							AFFECTATION, DEUX_PT, PT_VIRG, PAR_G, PAR_D;
+terminal							PLUS, MOINS, MULTIPLIE, ET, OU, NON, EGAL, INFERIEUR;
+terminal							ECRIRE;
+terminal		Value				LITERAL;
+terminal		Identifier			ID;
+
+non terminal	Program				algo;
+non terminal	Set<Identifier>		declarations;
+non terminal	Instruction			instruction, commande, si, tantque, pour;
+non terminal	Sequence			sequence;
+non terminal	Expression			expression, catch_expr, somme, produit, oppose, terme, disjunction, comparison, conjunction, negation;
+
+algo ::=
+		ALGORITHME 
+		DEBUT sequence:s FIN						{: RESULT = new Program(Set.of(), s); :}
+	|	ALGORITHME 
+		VARIABLES declarations:d 	
+		DEBUT sequence:s FIN						{: RESULT = new Program(d, s); :}
+	|	error FIN									{: RESULT = new Program(Set.of(), error("Erreur dans le programme")); :}
+;
+
+declarations ::=
+		/* Empty */									{: RESULT = new HashSet<>(); :}
+	|	declarations:s ID:id PT_VIRG				{: RESULT = s; RESULT.add(id); :}
+	|	declarations:s ID:id DEUX_PT ID PT_VIRG		{: RESULT = s; RESULT.add(id); :}
+;
+
+ /* Instructions */
+
+sequence ::=
+		/* Empty */									{: RESULT = new Sequence(new ArrayList<>()); :}
+	|	sequence:s instruction:i					{: RESULT = s; RESULT.commands().add(i); :}
+	|	sequence:s PT_VIRG							{: RESULT = s; :}
+;
+
+instruction ::=	
+		commande:c PT_VIRG							{: RESULT = c; :}
+	|	si:s		 								{: RESULT = s; :}
+	|	tantque:t				 					{: RESULT = t; :}
+	|	pour:p				 						{: RESULT = p; :}
+	|	error PT_VIRG								{: RESULT = error("Erreur dans la commande"); :}
+;
+
+commande ::=
+		ID:id AFFECTATION expression:e				{: RESULT = mark(new Assignment(id,e), id, e); :}
+	|	ECRIRE:deb PAR_G catch_expr:e PAR_D:fin		{: RESULT = mark(new Write(e), deb, fin); :}
+;
+
+si ::=
+		SI:deb catch_expr:cond ALORS 
+			sequence:iftrue
+		SINON 
+			sequence:iffalse 
+		FIN SI:fin									{: RESULT = mark(new If(cond, iftrue, Optional.of(iffalse)), deb, fin); :}
+	|	SI:deb catch_expr:cond ALORS 
+			sequence:iftrue
+		FIN SI:fin									{: RESULT = mark(new If(cond, iftrue, Optional.empty()), deb, fin); :}
+ 	|	error FIN SI								{: RESULT = error("Erreur dans la conditionnelle"); :}
+;
+
+tantque ::=
+		TANT:deb QUE catch_expr:cond FAIRE
+			sequence:body
+		FIN TANT QUE:fin							{: RESULT = mark(new While(cond, body), deb, fin); :}
+ 	|	error FIN TANT QUE							{: RESULT = error("Erreur dans la boucle tant que"); :}
+;
+
+pour ::=
+		POUR:deb ID:id DE catch_expr:d A catch_expr:f FAIRE 
+			sequence:body 
+		FIN POUR:fin								{: RESULT = mark(new For(id, d, f, Optional.empty(), body), deb, fin); :}
+	|	POUR:deb ID:id DE catch_expr:d A catch_expr:f PAS catch_expr:p FAIRE 
+			sequence:body 
+		FIN POUR:fin								{: RESULT = mark(new For(id, d, f, Optional.of(p), body), deb, fin); :}
+ 	|	error FIN POUR								{: RESULT = error("Erreur dans la boucle pour"); :}
+;
+
+ /* Expressions */
+
+catch_expr ::=
+		expression:e		 						{: RESULT = e; :}
+	|	error										{: RESULT = error("Erreur dans l'expression"); :}
+	|												{: RESULT = error("Expression manquante"); :}
+;
+
+expression ::= 	
+		disjunction:d								{: RESULT = d; :}
+;
+
+disjunction ::=
+		conjunction:d								{: RESULT = d; :}
+	|	disjunction:l OU conjunction:r				{: RESULT = mark(new Or(l, r), l, r); :}
+;
+
+conjunction ::=
+		negation:c									{: RESULT = c; :}
+	|	conjunction:l ET negation:r					{: RESULT = mark(new And(l, r), l, r); :}
+;
+
+negation ::=
+		comparison:c								{: RESULT = c; :}
+	|	NON:deb negation:n 							{: RESULT = mark(new Not(n), deb, n); :}
+;
+
+comparison ::=
+		somme:s										{: RESULT = s; :}
+	|	somme:l INFERIEUR somme:r					{: RESULT = mark(new Lower(l, r), l, r); :}
+	|	somme:l EGAL somme:r						{: RESULT = mark(new Equal(l, r), l, r); :}
+;
+
+somme ::=
+		produit:p									{: RESULT = p; :}
+	|	somme:l	PLUS	produit:r					{: RESULT = mark(new Sum(l, r), l, r); :}
+	|	somme:l	MOINS	produit:r					{: RESULT = mark(new Difference(l, r), l, r); :}
+;
+
+produit ::=
+		oppose:o									{: RESULT = o; :}
+	|	produit:l	MULTIPLIE	oppose:r			{: RESULT = mark(new Product(l, r), l, r); :}
+;
+
+oppose ::=	
+		terme:i										{: RESULT = i; :}
+	|	MOINS:deb oppose:o					       	{: RESULT = mark(new Inverse(o), deb, o); :}
+;
+
+terme ::=
+		LITERAL:l									{: RESULT = l; :}
+	|	ID:id										{: RESULT = id; :}
+    |	PAR_G	expression:e	PAR_D				{: RESULT = e; :}
+;
